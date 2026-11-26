@@ -17,7 +17,7 @@
 | 계좌거래내역 | `account_transaction` | 계좌번호 `account_no`, 거래번호 `tx_no`, 거래일시 `tx_at`, 거래종류 `tx_type`, 거래금액 `amount`, 적요 `description`, 거래후잔고 `balance_after`, 이체번호 `transfer_id` |
 | 카드거래내역 | `card_transaction` | 카드번호 `card_no`, 거래번호 `tx_no`, 거래일시 `tx_at`, 가맹점 `merchant`, 거래금액 `amount`, 할부개월 `installment_months` |
 | 계좌이체 | `transfer` | 이체번호 `transfer_id`, 출금계좌번호 `from_account_no`, 입금계좌번호 `to_account_no`, 이체금액 `amount`, 이체일시 `transferred_at`, 메모 `memo` |
-| 카드청구서 | `card_bill` | 카드번호 `card_no`, 청구년월 `bill_month`, 청구금액 `bill_amount`, 납부기한 `due_date`, 납부금액 `paid_amount`, 납부일자 `paid_date`, 상태 `status` |
+| 카드청구서 | `card_bill` | 카드번호 `card_no`, 청구년월 `bill_month`, 청구금액 `bill_amount`, 납부기한 `due_date`, 납부금액 `paid_amount`, 최종납부일자 `last_paid_date`, 상태 `status` |
 
 ### ENUM 값
 
@@ -26,9 +26,9 @@
 | `account.account_type` | `CHECKING`(보통예금), `INSTALLMENT_SAVINGS`(적금) |
 | `account.status` | `ACTIVE`, `SUSPENDED`, `CLOSED` |
 | `card.card_type` | `CREDIT`, `DEBIT` |
-| `card.status` | `ACTIVE`, `SUSPENDED`, `LOST`, `CLOSED` |
+| `card.status` | `PENDING`(등록대기), `ACTIVE`, `SUSPENDED`, `LOST`, `CLOSED` |
 | `account_transaction.tx_type` | `DEPOSIT`, `WITHDRAWAL` |
-| `card_bill.status` | `UNPAID`, `PAID` |
+| `card_bill.status` | `UNPAID`(미납), `PARTIAL`(부분납부), `PAID`(완납) |
 
 ---
 
@@ -70,7 +70,7 @@
 - `DEBIT`: `credit_limit`, `payment_day` 모두 NULL
 - `payment_day`: **1~28**
 - `(linked_account_no, member_id)` → `account(account_no, member_id)`: 카드주 본인 계좌만 연결
-- `issued_date` NULL = 미발급(신청만 된 상태)
+- `status = 'PENDING'`(등록대기) ⇔ `issued_date` NULL. 발급 시 `ACTIVE`로 변경
 - `closed_date`는 `status = 'CLOSED'`일 때만 NOT NULL
 
 **account_transaction**
@@ -92,17 +92,19 @@
 **card_bill**
 - PK `(card_no, bill_month)`. `CREDIT` 카드만
 - `bill_month` 형식: `'202611'`
-- `0 <= paid_amount <= bill_amount`
-- `PAID`면 `paid_date` NOT NULL, `UNPAID`면 NULL (부분 납부 시 `UNPAID` + `paid_amount > 0`)
+- `bill_amount > 0`
+- `UNPAID`: `paid_amount = 0`, `last_paid_date` NULL
+- `PARTIAL`: `0 < paid_amount < bill_amount`, `last_paid_date` NOT NULL
+- `PAID`: `paid_amount = bill_amount`, `last_paid_date` NOT NULL
 
 ### 2-4. 꼭 넣어볼 케이스
 
 - [ ] 같은 회원의 계좌 간 이체 1건
 - [ ] 다른 회원 계좌로 이체 1건
 - [ ] 3개월 할부 거래 1건
-- [ ] `PAID` 청구서 1건, `UNPAID` 청구서 1건
+- [ ] `PAID`, `PARTIAL`, `UNPAID` 청구서 각 1건
 - [ ] 카드대금 납부로 생긴 `account_transaction` 출금 1건
-- [ ] 미발급 카드(`issued_date` NULL) 1장
+- [ ] 등록대기 카드(`status = 'PENDING'`, `issued_date` NULL) 1장
 
 ### 2-5. 실패해야 정상인 INSERT (제약 동작 확인)
 
@@ -117,7 +119,7 @@
 
 ```
 credit_limit                     3,000,000
-− UNPAID 청구서 미납액 (bill_amount − paid_amount)   500,000
+− PAID 아닌 청구서 미납액 (bill_amount − paid_amount)   500,000
 − 아직 청구 안 된 사용액                              200,000
 = 남은 한도                                        2,300,000
 ```
@@ -183,8 +185,8 @@ credit_limit                     3,000,000
 |---|---|---|---|
 | Q23 | 월 청구금액 집계 | 일시불 + 할부 회차분(`amount / installment_months`) 합산 | GROUP BY, 날짜 함수, CASE |
 | Q24 | 청구서 생성 | 집계 결과로 `card_bill` INSERT | INSERT ... SELECT |
-| Q25 | 대금 납부 | `paid_amount`·`paid_date`·`status` 갱신 + 계좌 출금 | UPDATE, 트랜잭션 |
-| Q26 | 미납 청구서 목록 | 납부기한 지난 `UNPAID` | WHERE + 날짜 비교 + JOIN(member) |
+| Q25 | 대금 납부 | `paid_amount`·`last_paid_date`·`status` 갱신 + 계좌 출금 | UPDATE, 트랜잭션 |
+| Q26 | 미납 청구서 목록 | 납부기한 지난 `UNPAID`·`PARTIAL` | WHERE + 날짜 비교 + JOIN(member) |
 
 ### 3-7. 통계 연습
 
